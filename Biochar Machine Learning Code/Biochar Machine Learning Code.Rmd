@@ -1,0 +1,416 @@
+---
+title: "Machine Learning Hyperparameters and Model Code for Biochar"
+author: "Chaotang Lei, Zhejiang University of Technology"
+date: "2023-11-01"
+output: html_document
+---
+
+# Description:
+
+Here were the machine learning hyperparameters and the associated machine learning code used in the article "Machine Learning Model Revealed How Biochar Amendments Affect Soil Microbial Communities".
+
+------------------------------------------------------------------------
+
+```{r}
+
+#Load R packages
+library(randomForest)
+library(caret)
+library(pROC)
+library(tidyverse)
+library(e1071)
+library(dplyr)
+library(ROCR)
+library(ggsignif)
+```
+
+```{r}
+
+#Load data
+
+data <- read.csv("DEMO.csv",row.names = 1)
+head(data)
+
+group <- read.csv("group.csv")
+head(group)
+```
+
+```{r}
+
+#Create Resample (75 % of input data and 25$ Resamples)
+
+data_norm <- as.data.frame(data,center=T,scale=T)
+data_all <- cbind(data_norm,group)
+data_all <- data_all[,-which(colnames(data_all) %in% c("sample"))]
+data_all <- data_all[,-which(colnames(data_all) %in% c("groupname"))]
+data_all$group <- factor(data_all$group,levels = c("1","0"))
+
+select_train <- sample(sample_number,sample_number*0.75)
+data_train <- data_all[select_train,]
+data_test <- data_all[-select_train,]
+```
+
+```{r}
+
+#10-fold cross-validation
+
+tr <- trainControl(method = "cv",number = 10)
+```
+
+# Hyperparameters for machine learning are performed here. This step was slowly！！！
+
+# Random Forest
+
+```{r}
+
+#A method is redefined to allow strict parameterization of random forests with multiple parameters.
+set.seed(321)
+custom_RF <- list(
+  type = "Classification",
+  library = "randomForest",
+  loop = NULL,
+  parameters = data.frame(parameter = c("mtry", "ntree", "nodesize"), 
+                          class = rep("numeric", 3), 
+                          label = c("mtry", "ntree", "nodesize")),
+  
+  grid = function(x, y, len = NULL, search = "grid") {
+    if(search == "grid") {
+      out <- expand.grid(mtry = caret::var_seq(p = ncol(x),
+                                               classification = TRUE,
+                                               len = len),
+                         ntree = c(500, 800, 1000, 1200, 1500, 2000),
+                         nodesize = c(3, 4, 5, 6, 7, 8, 9, 10))
+    } else {
+      out <- data.frame(mtry = unique(sample(1:ncol(x), size = len, replace = TRUE)),
+                        ntree = unique(sample(c(500, 700, 900, 1000, 1500), 
+                                              size = len, replace = TRUE)),
+                        nodesize = unique(sample(c(3, 4, 5, 6, 7, 8, 9, 10), 
+                                                 size = len, replace = TRUE)))
+    }
+  },
+  fit = function(x, y, wts, param, lev, last, weights, classProbs, ...) {
+    randomForest(x, y, 
+                 mtry = param$mtry, 
+                 ntree = param$ntree, 
+                 nodesize = param$nodesize, ...)
+  },
+  predict = function(modelFit, 
+                     newdata, 
+                     preProc = NULL, 
+                     submodels = NULL) {
+    predict(modelFit, newdata)
+  },
+  prob = NULL,
+  sort = NULL
+)
+
+# Tuned parameterization in the training set.
+
+if(file.exists('rf_fit.rda')) {
+  rf_fit <- readRDS("rf_fit.rda")
+} else {
+  tunegrid <- expand.grid(mtry = c(10, 20, 30, 40, 50, 100), 
+                          ntree = c(500, 800, 1000, 1200, 1500, 2000),
+                          nodesize = c(3, 4, 5, 6, 7, 8, 9, 10))
+  
+  rf_fit <- train(group ~ .,
+                  data = data_train,
+                  method = custom_RF,
+                  metric = "Accuracy",  # Use an appropriate metric for classification
+                  tuneGrid = tunegrid,
+                  trControl = tr)
+  saveRDS(rf_fit, "rf_fit.rda")
+}
+
+print(rf_fit)
+
+#output result of Randomforest
+
+result_rf <- as.data.frame(rf_fit$result)
+write.csv(result_rf,"Randomforest_fit.csv")
+result_rf$ntree <- factor(result_rf$ntree)
+result_rf$nodesize <- factor(result_rf$nodesize)
+```
+
+#Visualization of model results
+
+```{r}
+#Model accuracy
+
+P1 <-ggplot(data=result_rf, aes(x = mtry,y = Accuracy, group = ntree, color = ntree)) +
+     geom_line(size = 0.5)+
+     geom_point(size = 2)+
+     scale_color_manual(values = c("#4169B2","#B1A4C0","#479E9B",
+                                   "#BB2BA0","#DDA0DD","#BC8F8F"))+
+                                     facet_wrap(~nodesize)+ 
+  theme_bw(base_size = 15)
+P1
+
+#Model kappa index
+
+P2 <-ggplot(data=result_rf, aes(x = mtry,y = kappa, group = ntree, color = ntree)) +
+     geom_line(size = 0.5)+
+     geom_point(size = 2)+
+     scale_color_manual(values = c("#4169B2","#B1A4C0","#479E9B",
+                                   "#BB2BA0","#DDA0DD","#BC8F8F"))+
+                                      facet_wrap(~nodesize)+ 
+  theme_bw(base_size = 15)
+P2
+```
+
+# Support Vector Machine (SVM)
+
+```{r}
+
+svm_grid <- expand.grid(
+  sigma = c(0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1),
+  C = c(0,0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2,5))
+
+set.seed(321)
+svm_fit <- train(group ~., 
+                 data = data_train, method = "svmRadial",
+                 trControl = tr,
+                 preProcess = c("center", "scale"),
+                 tuneGrid = svm_grid,
+                 tuneLength = 10,
+                 metric = "Accuracy")
+
+print(svm_fit)
+
+#output result of Support Vector Machine
+
+saveRDS(svm_fit, "svm_fit.rda")
+result_svm <- as.data.frame(svm_fit$results)
+result_svm[is.na(result_svm)] <- 0
+write.csv(result_svm, "SVM_fit.csv")
+result_svm$sigma <- factor(result_svm$sigma)
+```
+
+#Visualization of model results
+
+```{r}
+
+#Model accuracy
+P3 <- ggplot(data=result_svm, aes(x = C,y = Accuracy, group = sigma, color = sigma)) +
+      geom_line(size = 0.5)+
+      geom_point(size = 2)+
+      scale_color_manual(values = c("#4169B2","#B1A4C0","#479E9B",
+                                    "#BB2BA0","#DDA0DD","#BC8F8F",
+                                    "#FFDAB9","#B4EEB4","#99CCFF",
+                                    "#AC9179","#CDD7CB","#594B69",
+                                    "#DBCD9D","#73844F","#D499A4")) +
+                                       theme_bw(base_size = 15)
+P3
+
+#Model kappa index
+
+P4 <- ggplot(data=result_svm, aes(x = C,y = kappa, group = sigma, color = sigma)) +
+      geom_line(size = 0.5)+
+      geom_point(size = 2)+
+      scale_color_manual(values = c("#4169B2","#B1A4C0","#479E9B",
+                                    "#BB2BA0","#DDA0DD","#BC8F8F",
+                                    "#FFDAB9","#B4EEB4","#99CCFF",
+                                    "#AC9179","#CDD7CB","#594B69",
+                                    "#DBCD9D","#73844F","#D499A4")) +
+                                       theme_bw(base_size = 15)
+P4
+```
+
+# Logistic Regression (LR)
+
+```{r}
+
+LR_grid <- expand.grid(alpha = 0:1, lambda = seq(0.001, 1, by = 0.001))
+
+LR_fit <- train(group ~ .,  
+                data = data_train,
+                method = "glmnet",
+                trControl = tr
+                metric = "Accuracy",
+                tuneGrid = LR_grid)
+print(LR_fit)
+saveRDS(LR_fit, "LR_fit.rda")
+
+#output result of Logistic Regression
+result_LR <- as.data.frame(LR_fit$results)
+result_LR[is.na(result_LR)] <- 0
+write.csv(result_LR, "LR_fit.csv")
+result_LR$alpha <- factor(result_LR$alpha)
+```
+
+#Visualization of model results
+
+```{r}
+
+#Model accuracy
+P5 <- ggplot(data=result_LR, aes(x = lambda,y = Accuracy, group = alpha, color = alpha)) +
+      geom_line(size = 0.5)+
+      geom_point(size = 2)+
+     scale_color_manual(values = c("#4169B2","#B1A4C0","#479E9B",
+                                   "#BB2BA0","#DDA0DD","#BC8F8F",
+                                   "#FFDAB9","#B4EEB4","#99CCFF",
+                                   "#AC9179","#CDD7CB","#594B69",
+                                   "#DBCD9D","#73844F","#D499A4")) +
+                                     theme_bw(base_size = 15)
+
+P5
+
+#Model kappa index
+
+P6 <- ggplot(data=result_LR, aes(x = lambda,y = kappa, group = alpha, color = alpha)) +
+      geom_line(size = 0.5)+
+      geom_point(size = 2)+
+     scale_color_manual(values = c("#4169B2","#B1A4C0","#479E9B",
+                                   "#BB2BA0","#DDA0DD","#BC8F8F",
+                                   "#FFDAB9","#B4EEB4","#99CCFF",
+                                   "#AC9179","#CDD7CB","#594B69",
+                                   "#DBCD9D","#73844F","#D499A4")) +
+                                     theme_bw(base_size = 15)
+
+P6
+```
+
+#Merged plots of model hyperparameter results
+
+```{r}
+P_hyperparameter <- (P1 + P3 + P5)|(P2 + P4 + P6)
+P_hyperparameter
+```
+
+# Machine learning section
+
+```{r}
+#Redefining the 10-fold cross-validation format changed to a 10-fold cross-validation repeated 5 times.
+TR <- trainControl(method = "repeatedcv",
+                     number = 10,
+                     repeats = 5)
+#data disposal
+data_all <-cbind(data_norm,group)
+data_all <- data_all[,-which(colnames(data_all) %in% c("sample"))]
+data_all <- data_all[,-which(colnames(data_all) %in% c("group"))]
+select_train<-sample(1288,1288*0.75)
+data_train <- data_all[select_train,]
+data_test <- data_all[-select_train,]
+
+train_data <- data_train[, -ncol(data_train)]
+group_train <- as.factor(data_train[, ncol(data_train)])
+test_data <- data_test[, -ncol(data_test)]
+group_test <- as.factor(data_test[, ncol(data_test)])
+```
+
+# Random Forest (mtry ntree and nodesise all best)
+
+```{r}
+RF <- randomForest(x = train_data, 
+                   y = group_train, 
+                   nodesize = 5,
+                   mtry = 40,
+                   ntree = 800,
+                   trControl = TR)
+print(RF)
+
+test_pre <- predict(RF, newdata = test_data,type = "prob")
+
+# Calculation of model indicators
+confusion_matrix <- confusionMatrix(test_pre, group_test)
+accuracy <- confusion_matrix$overall["Accuracy"]
+precision <- confusion_matrix$byClass["Pos Pred Value"]
+recall <- confusion_matrix$byClass["Sensitivity"]
+f1_score <- confusion_matrix$byClass["F1"]
+
+# Output model indicators
+print(confusion_matrix)
+print(paste("Accuracy:", accuracy))
+print(paste("Precision:", precision))
+print(paste("Recall:", recall))
+print(paste("F1 Score:", f1_score))
+```
+
+# plotted Random Forest ROC curves
+
+```{r}
+train_pre <- predict(RF, newdata = train_data,type = "prob")
+test_pre <- predict(RF, newdata = test_data,type = "prob")
+
+roc_train <- roc(response = group_train, predictor = train_pre[, 2])
+Auc_train <- auc(roc_train)
+roc_test <- roc(response = group_test, predictor = test_pre[, 2])
+Auc_test <- auc(roc_test)
+
+ROC_train <- data.frame(1 - roc_train$specificities, roc_train$sensitivities)
+ROC_test <- data.frame(1 - roc_test$specificities, roc_test$sensitivities)
+
+rf_train_ROC <- ggplot(ROC_train, aes(x = 1 - roc_train$specificities, y = roc_train$sensitivities)) +
+                geom_line(color = "#1250A2", size = 1.5) +
+                geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), linetype = "dashed", color = "gray") +
+                geom_text(aes(x = 0.8, y = 0.2, label = paste("AUC =", round(Auc_train, 2))), size = 4, color = "black") +
+                coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+                labs(x = "1 - Specificity", y = "Sensitivity") +
+                theme(plot.title = element_text(size = 14, face = "bold"))
+
+rf_test_ROC <- ggplot(ROC_test, aes(x = 1 - roc_test$specificities, y = roc_test$sensitivities)) +
+               geom_line(color = "#CB211C", size = 1.5) +
+               geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), linetype = "dashed", color = "gray") +
+               geom_text(aes(x = 0.8, y = 0.2, label = paste("AUC =", round(Auc_test, 2))), size = 4, color = "black") +
+               coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+               labs(x = "1 - Specificity", y = "Sensitivity") +
+               theme(plot.title = element_text(size = 14, face = "bold"))
+```
+
+# Training set classification and visualization
+
+```{r}
+
+predicts_train <- t(apply(train_pre,1,function(v){v/sum(v)}))
+colnames(predicts_train) <- colnames(train_pre)
+predicts_train <- data.frame(predicts_train,check.names = F)
+predicts_train$predicted <- apply(predicts_train,1,function(v){names(v)[max(v)==v]})
+predicts_train$observed <- group_train
+sum(predicts_train$predicted==predicts_train$observed)
+da_va_train <- data.frame(t(data_train))
+df_train <- da_va_train[,row.names(predicts_train)]
+df_train <- df_train[-1653,]
+df_train=apply(df_train,2,as.numeric)
+mean_train <- apply(df_train,2,mean,na.rm=T)
+mean_train
+data <- data.frame(mean_train,predicts_train=predicts_train$`1`,sample2=row.names(predicts_train),type2=predicts_train$observed )
+P_train <- ggplot(data,aes(x=predicts_train,y=mean_train,group=type2,color=type2))+geom_point(size=4)+
+  geom_vline(xintercept = 0.5,linetype="dotted")+xlab("predict value")+ylab("Average intersity")+
+  ggtitle("Biochar-Randomforest-train")+
+  xlim(0,1)+
+  theme(legend.text = element_text(size = 15,color = "black"),legend.position = 'right',
+        legend.title = element_blank(),panel.grid.major =element_blank(),
+        panel.grid.minor = element_blank(),panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))+
+  theme(panel.grid = element_blank())+
+  theme(axis.text = element_text(size = 10,color = "black"))+
+  theme(axis.text.x = element_text(hjust = 1,angle = 45))+
+  theme(plot.subtitle = element_text(size = 30, hjust = 0, color = "black"))+
+  theme(axis.title.x = element_text(size = 17, hjust = 0.5, color = "black"))+
+  theme(axis.title.y = element_text(size = 17, hjust = 0.5, color = "black"))+
+  scale_color_manual(limits=c("1","0"), values=c("#337ab7","#FF000D"))
+P_train
+
+# The test set was similar
+```
+
+# Cross-validation helps selected specific number of biomarkers
+
+```{r}
+result <- replicate(10, rfcv(train_data, group_train, cv.fold = 10, step = 1.5,scale = "log"), simplify = FALSE)
+result
+error.cv=sapply(result,"[[","error.cv")
+matplot(result[[1]]$n.var,cbind(rowMeans(error.cv),error.cv),type = "l",
+        lwd = c(2,rep(1,ncol(error.cv))),col = 1,lty = 1,
+        log="x",xlab = "Number of biomakers",ylab="CV Error")
+```
+
+# show the first 60 important species
+
+```{r}
+varImpPlot(data_train.forest,sort = TRUE, n.var = min(60,nrow(data_train.forest$importance)), main = 'Top 60 - Variable importance')
+result <- data.frame(importance(data_train.forest,type=1))
+result$ID<- row.names(result)
+result <- data.frame( result[order(result$MeanDecreaseAccuracy,decreasing = T),])
+write.CSV(result, 'TOP_60-Importance_Taxonomy.CSV')
+```
